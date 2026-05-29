@@ -21,9 +21,20 @@ def _max_scan() -> int:
 async def live_movers(
     kind: WatchKind = "live",
     limit: int = Query(100, ge=1, le=500),
+    live_prices: bool = Query(
+        False,
+        description="Refresh quotes (slow). Default off — use cached scan + price cache for fast tab switches.",
+    ),
+    force_prices: bool = Query(False, description="Bypass price cache when live_prices=true"),
 ):
-    """Filter the last completed scan only — never starts a new scan."""
+    """Filter last scan; optionally refresh live prices (quotes only, not a full scan)."""
     snapshots = await scanner.get_latest_scan()
+    if not snapshots:
+        return []
+    if live_prices:
+        return await scanner.refresh_prices(
+            kind=kind, display_limit=limit, force=force_prices
+        )
     return scanner.filter_watchlist(snapshots, kind, display_limit=limit)
 
 
@@ -42,11 +53,10 @@ async def scan_meta():
 async def refresh_prices(
     kind: WatchKind = "live",
     limit: int = Query(100, ge=1, le=500),
+    force: bool = Query(True, description="Bypass quote cache"),
 ):
-    """Re-fetch live Alpaca/Finnhub quotes for the last scan — no full rescan."""
-    await scanner.refresh_prices()
-    snapshots = await scanner.get_latest_scan()
-    return scanner.filter_watchlist(snapshots, kind, display_limit=limit)
+    """Re-fetch live quotes for tickers on this tab — no full rescan."""
+    return await scanner.refresh_prices(kind=kind, display_limit=limit, force=force)
 
 
 @router.get("/limits")
@@ -55,10 +65,14 @@ async def scan_limits():
     return {
         "scan_max_symbols": s.scan_max_symbols,
         "scan_news_max_symbols": s.scan_news_max_symbols,
+        "scan_min_daily_volume": s.scan_min_daily_volume,
+        "scan_min_market_cap": s.scan_min_market_cap,
         "note": (
             f"Scans above {s.scan_news_max_symbols} symbols skip per-ticker news "
             "(prices/scores only) to avoid Finnhub rate limits. "
-            f"Max {s.scan_max_symbols} symbols; large scans take several minutes."
+            f"Max {s.scan_max_symbols} symbols; large scans take several minutes. "
+            f"Filters: volume >= {s.scan_min_daily_volume:,} shares, "
+            f"market cap >= ${s.scan_min_market_cap:,.0f}."
         ),
     }
 

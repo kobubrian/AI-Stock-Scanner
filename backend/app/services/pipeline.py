@@ -11,6 +11,22 @@ from app.models.ticker import Catalyst, TickerSnapshot
 from app.scoring.rules import score_ticker
 
 
+def _session_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "price_as_of": raw.get("price_as_of"),
+        "price_source": str(raw.get("price_source") or ""),
+        "session": str(raw.get("session") or raw.get("active_session") or ""),
+        "active_session": str(raw.get("active_session") or raw.get("session") or ""),
+        "price_session": str(raw.get("price_session") or ""),
+        "regular_close": raw.get("regular_close"),
+        "afterhours_price": raw.get("afterhours_price"),
+        "afterhours_percent_change": raw.get("afterhours_percent_change"),
+        "premarket_price": raw.get("premarket_price"),
+        "overnight_price": raw.get("overnight_price"),
+        "market_price": raw.get("market_price"),
+    }
+
+
 async def build_snapshot(symbol: str, *, include_news: bool = True) -> TickerSnapshot:
     raw = await fetch_raw_market(symbol)
     raw["price"] = float(raw.get("price") or 0)
@@ -57,9 +73,6 @@ async def build_snapshot(symbol: str, *, include_news: bool = True) -> TickerSna
         dollar_volume=features.get("dollar_volume"),
         float_shares=raw.get("float_shares"),
         sector=raw.get("sector"),
-        price_as_of=raw.get("price_as_of"),
-        price_source=str(raw.get("price_source") or ""),
-        session=str(raw.get("session") or ""),
         catalysts=catalysts,
         analyst_targets=raw.get("analyst_targets") or [],
         last_news_time=raw.get("last_news_time"),
@@ -69,6 +82,7 @@ async def build_snapshot(symbol: str, *, include_news: bool = True) -> TickerSna
         data_source=raw.get("source", "none"),
         data_available=features.get("data_available", False),
         updated_at=datetime.now(timezone.utc),
+        **_session_fields(raw),
     )
 
 
@@ -116,10 +130,8 @@ async def build_snapshot_from_raw(raw: dict[str, Any]) -> TickerSnapshot:
         lod=raw.get("lod"),
         gap_percent=features.get("gap_percent"),
         dollar_volume=features.get("dollar_volume"),
-        price_as_of=raw.get("price_as_of"),
-        price_source=str(raw.get("price_source") or ""),
-        session=str(raw.get("session") or ""),
         catalysts=catalysts,
+        **_session_fields(raw),
         analyst_targets=raw.get("analyst_targets") or [],
         scores=scores,
         trade_plan=plan,

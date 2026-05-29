@@ -27,9 +27,13 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
-    # Market data feed for snapshot: "" (Alpaca default), "sip" (full tape — needs data subscription),
-    # "iex" (limited). Using "sip" when your account includes it improves premarket/after-hours prints.
+    # Market data feed: "", "iex", "sip", "otc", "overnight", "boats"
+    # If blank and alpaca_use_overnight_session_feed=true, uses overnight feed 8pm-4am ET automatically.
     alpaca_market_data_feed: str = ""
+    # Auto-select Alpaca overnight session feed (Blue Ocean) during 8:00 PM - 4:00 AM ET.
+    alpaca_use_overnight_session_feed: bool = True
+    # "overnight" = indicative (cheaper plan); "boats" = full BOATS tape (Algo Trader Plus).
+    alpaca_overnight_feed: str = "overnight"
     finnhub_api_key: str = ""
     # Free tier: avoid /stock/metric (often 403). Alpaca already has VWAP/volume.
     finnhub_fetch_metrics: bool = False
@@ -44,6 +48,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # Set true to run scheduled scans (premarket, open, etc.). Default off — manual scan only.
+    scheduler_enabled: bool = False
+
     scan_premarket: str = "04:00"
     scan_open_confirm: str = "06:30"
     scan_midday: str = "10:00"
@@ -52,6 +59,10 @@ class Settings(BaseSettings):
     # Max symbols per manual scan (API limit). Large scans are slow; news skipped above threshold.
     scan_max_symbols: int = 2000
     scan_news_max_symbols: int = 100
+
+    # Universe filters — tickers below these are excluded from scan results and watchlists.
+    scan_min_daily_volume: int = 100_000
+    scan_min_market_cap: float = 50_000_000
 
     account_balance: str = ""
     account_pdt_restricted: bool = False

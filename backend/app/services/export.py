@@ -7,7 +7,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.models.ticker import TickerSnapshot
-from app.services.scanner import filter_watchlist, run_scan
+from app.services.scanner import filter_watchlist, get_latest_scan, run_scan
 
 EXPORT_DIR = Path(__file__).resolve().parents[2] / "data" / "exports"
 
@@ -64,9 +64,11 @@ def _ticker_packet(snap: TickerSnapshot) -> dict[str, Any]:
     }
 
 
-async def build_ai_export_pack(limit: int = 30) -> dict[str, Any]:
+async def build_ai_export_pack(limit: int = 30, *, force_rescan: bool = False) -> dict[str, Any]:
     settings = get_settings()
-    snapshots = await run_scan("ai_export", limit=limit)
+    snapshots = await get_latest_scan()
+    if force_rescan or not snapshots:
+        snapshots = await run_scan("ai_export", limit=limit)
 
     live = filter_watchlist(snapshots, "live")
     longs = filter_watchlist(snapshots, "long")[:10]

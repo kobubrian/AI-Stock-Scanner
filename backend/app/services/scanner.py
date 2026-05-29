@@ -18,6 +18,27 @@ ScanKind = Literal["live", "long", "short", "squeeze", "overnight_long", "overni
 DISPLAY_DEFAULT = 100
 
 
+def passes_scan_filters(snap: TickerSnapshot) -> bool:
+    """Min daily share volume and market cap (from settings)."""
+    settings = get_settings()
+    vol_min = int(settings.scan_min_daily_volume or 0)
+    if vol_min > 0 and int(snap.volume or 0) < vol_min:
+        return False
+
+    cap_min = float(settings.scan_min_market_cap or 0)
+    if cap_min > 0:
+        mc = snap.market_cap
+        # Only exclude when cap is known and below minimum (missing cap = keep row).
+        if mc is not None and float(mc) < cap_min:
+            return False
+
+    return True
+
+
+def apply_scan_filters(snapshots: list[TickerSnapshot]) -> list[TickerSnapshot]:
+    return [s for s in snapshots if passes_scan_filters(s)]
+
+
 def dedupe_snapshots(snapshots: list[TickerSnapshot]) -> list[TickerSnapshot]:
     """One row per ticker. Prefer live data, then larger |% change|. Preserves first-seen order."""
     by_ticker: dict[str, TickerSnapshot] = {}
@@ -53,6 +74,7 @@ async def run_scan(scan_type: str = "premarket", limit: int = 30) -> list[Ticker
 
     symbols = await universe.load_scan_universe(limit)
     snapshots = dedupe_snapshots(await _fetch_many(symbols, include_news=include_news))
+    snapshots = apply_scan_filters(snapshots)
     snapshots.sort(key=lambda s: abs(s.percent_change), reverse=True)
 
     async with async_session() as session:
@@ -72,7 +94,10 @@ async def run_scan(scan_type: str = "premarket", limit: int = 30) -> list[Ticker
             )
         await session.commit()
 
-    return snapshots
+    if snapshots:
+        await refresh_prices(symbols=[s.ticker for s in snapshots])
+
+    return await get_latest_scan() or snapshots
 
 
 async def _fetch_many(symbols: list[str], *, include_news: bool = True) -> list[TickerSnapshot]:
@@ -110,7 +135,7 @@ def filter_watchlist(
     *,
     display_limit: int = DISPLAY_DEFAULT,
 ) -> list[TickerSnapshot]:
-    snapshots = dedupe_snapshots(snapshots)
+    snapshots = apply_scan_filters(dedupe_snapshots(snapshots))
     if not snapshots:
         return []
 
@@ -183,22 +208,11 @@ async def get_latest_scan_meta() -> dict:
     if not run:
         return {"symbol_count": 0, "scanned_at": None, "prices_updated_at": None, "newest_price_as_of": None}
 
-    snapshots = await get_latest_scan()
-    prices_updated = None
-    newest_price_as_of = None
-    if snapshots:
-        updated_times = [s.updated_at for s in snapshots if s.updated_at]
-        if updated_times:
-            prices_updated = max(updated_times).isoformat()
-        price_times = [s.price_as_of for s in snapshots if s.price_as_of]
-        if price_times:
-            newest_price_as_of = max(price_times).isoformat()
-
     return {
         "symbol_count": run.symbol_count,
         "scanned_at": run.created_at.isoformat() if run.created_at else None,
-        "prices_updated_at": prices_updated,
-        "newest_price_as_of": newest_price_as_of,
+        "prices_updated_at": None,
+        "newest_price_as_of": None,
     }
 
 
@@ -228,7 +242,17 @@ def _merge_live_quotes(snap: TickerSnapshot, raw: dict) -> TickerSnapshot:
             "lod": raw.get("lod", snap.lod),
             "price_as_of": raw.get("price_as_of", snap.price_as_of),
             "price_source": raw.get("price_source") or snap.price_source,
-            "session": raw.get("session") or snap.session,
+            "session": raw.get("session") or raw.get("active_session") or snap.session,
+            "active_session": raw.get("active_session") or raw.get("session") or snap.active_session,
+            "price_session": raw.get("price_session") or snap.price_session,
+            "regular_close": raw.get("regular_close", snap.regular_close),
+            "afterhours_price": raw.get("afterhours_price", snap.afterhours_price),
+            "afterhours_percent_change": raw.get(
+                "afterhours_percent_change", snap.afterhours_percent_change
+            ),
+            "premarket_price": raw.get("premarket_price", snap.premarket_price),
+            "overnight_price": raw.get("overnight_price", snap.overnight_price),
+            "market_price": raw.get("market_price", snap.market_price),
             "data_source": raw.get("source") or snap.data_source,
             "data_available": bool(price),
             "updated_at": datetime.now(timezone.utc),
@@ -237,35 +261,56 @@ def _merge_live_quotes(snap: TickerSnapshot, raw: dict) -> TickerSnapshot:
     return TickerSnapshot.model_validate(data)
 
 
-async def refresh_prices(symbols: list[str] | None = None) -> list[TickerSnapshot]:
-    """Re-fetch live quotes for latest scan symbols (fast — no news/rescore)."""
-    from app.collectors import alpaca
-    from app.collectors.base import has_alpaca
+async def refresh_prices(
+    symbols: list[str] | None = None,
+    *,
+    kind: ScanKind | None = None,
+    display_limit: int = DISPLAY_DEFAULT,
+    force: bool = False,
+) -> list[TickerSnapshot]:
+    """Re-fetch live quotes per session (SIP + overnight). No news/rescore."""
     from app.collectors.market import fetch_raw_market
+    from app.services.price_cache import get, get_many, set as cache_set
 
-    snapshots = await get_latest_scan()
+    all_snaps = await get_latest_scan()
+    if not all_snaps:
+        return []
+
+    if symbols is None and kind is not None:
+        snapshots = filter_watchlist(all_snaps, kind, display_limit=display_limit)
+        symbols = [s.ticker for s in snapshots]
+    elif symbols:
+        want = {s.upper() for s in symbols}
+        snapshots = [s for s in all_snaps if s.ticker.upper() in want]
+    else:
+        snapshots = all_snaps
+
     if not snapshots:
         return []
 
     target = {s.ticker.upper() for s in snapshots}
-    if symbols:
-        want = {s.upper() for s in symbols}
-        snapshots = [s for s in snapshots if s.ticker.upper() in want]
-        target = want & target
-
     tickers = [s.ticker.upper() for s in snapshots]
-    raw_by_symbol: dict[str, dict] = {}
-    if has_alpaca():
-        raw_by_symbol = await alpaca.fetch_snapshots_batch(tickers)
+    cached: dict[str, dict] = {}
+    to_fetch = tickers
+    if force:
+        from app.services.price_cache import clear
 
-    sem = asyncio.Semaphore(8)
+        clear()
+    else:
+        cached, to_fetch = get_many(tickers)
+
+    sem = asyncio.Semaphore(6)
 
     async def one(snap: TickerSnapshot) -> TickerSnapshot:
         sym = snap.ticker.upper()
-        raw = raw_by_symbol.get(sym)
-        if not raw or not raw.get("price"):
+        raw = cached.get(sym)
+        if raw is None:
             async with sem:
-                raw = await fetch_raw_market(sym)
+                raw = await fetch_raw_market(snap.ticker, enrich_fundamentals=False)
+            if raw and raw.get("price"):
+                cache_set(sym, raw)
+        if not raw or not raw.get("price"):
+            return snap
         return _merge_live_quotes(snap, raw)
 
     updated = await asyncio.gather(*[one(s) for s in snapshots])
@@ -287,6 +332,8 @@ async def refresh_prices(symbols: list[str] | None = None) -> list[TickerSnapsho
             await session.commit()
 
     full = await get_latest_scan()
+    if kind is not None:
+        return filter_watchlist(full, kind, display_limit=display_limit)
     by_ticker = {s.ticker.upper(): s for s in updated}
     return [by_ticker.get(s.ticker.upper(), s) for s in full if s.ticker.upper() in target] or list(updated)
 

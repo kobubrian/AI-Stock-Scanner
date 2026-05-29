@@ -2,8 +2,8 @@
 
 from fastapi import APIRouter
 
-from app.collectors.base import has_fmp, has_polygon
-from app.services.pipeline import build_snapshot
+from app.collectors.base import has_alpaca, has_finnhub, has_fmp, has_polygon
+from app.collectors.market import fetch_raw_market
 
 router = APIRouter(prefix="/regime", tags=["regime"])
 
@@ -22,15 +22,15 @@ async def market_regime():
     items = []
     for sym, label in REGIME_SYMBOLS:
         try:
-            snap = await build_snapshot(sym)
+            raw = await fetch_raw_market(sym, enrich_fundamentals=False)
             items.append(
                 {
                     "symbol": sym,
                     "label": label,
-                    "price": snap.price,
-                    "change_pct": snap.percent_change,
-                    "above_vwap": snap.above_vwap,
-                    "data_available": snap.data_available,
+                    "price": raw.get("price"),
+                    "change_pct": raw.get("percent_change"),
+                    "above_vwap": raw.get("above_vwap"),
+                    "data_available": bool(raw.get("price")),
                 }
             )
         except Exception:
@@ -40,8 +40,10 @@ async def market_regime():
     return {
         "items": items,
         "keys_configured": {
+            "alpaca": has_alpaca(),
+            "finnhub": has_finnhub(),
             "polygon": has_polygon(),
             "fmp": has_fmp(),
         },
-        "note": "Add POLYGON_API_KEY or ALPACA keys for live regime data",
+        "note": "Quotes only — does not run a scanner",
     }

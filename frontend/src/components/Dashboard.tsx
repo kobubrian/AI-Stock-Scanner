@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { clearPriceCache, mergeCachedPrices, storePricesFromRows } from "../lib/priceCache";
 import { MoversTable } from "./MoversTable";
 
 const API = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
@@ -22,7 +23,13 @@ type Snapshot = {
   relative_volume: number;
   above_vwap?: boolean | null;
   session?: string;
+  active_session?: string;
   price_as_of?: string | null;
+  regular_close?: number | null;
+  afterhours_price?: number | null;
+  overnight_price?: number | null;
+  premarket_price?: number | null;
+  market_price?: number | null;
   scores: { long_score: number; short_score: number; squeeze_risk: number };
   trade_plan: { stop?: number | null; target_1?: number | null };
   data_available: boolean;
@@ -43,13 +50,6 @@ async function fetchJson<T>(url: string, fallback: T): Promise<T> {
   }
 }
 
-function isPriceStale(iso: string | null | undefined, maxSec = 120): boolean {
-  if (!iso) return true;
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return true;
-  return Date.now() - t > maxSec * 1000;
-}
-
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>("live");
   const [rows, setRows] = useState<Snapshot[]>([]);
@@ -59,64 +59,121 @@ export function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [refreshingPrices, setRefreshingPrices] = useState(false);
+  const [loadingPrices, setLoadingPrices] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scanLimit, setScanLimit] = useState(50);
   const [displayLimit, setDisplayLimit] = useState(100);
   const [maxScan, setMaxScan] = useState(2000);
   const [newsMax, setNewsMax] = useState(100);
+  const [minVolume, setMinVolume] = useState(100_000);
+  const [minMarketCap, setMinMarketCap] = useState(50_000_000);
   const [lastScanCount, setLastScanCount] = useState(0);
   const [scannedAt, setScannedAt] = useState<string | null>(null);
   const [pricesUpdatedAt, setPricesUpdatedAt] = useState<string | null>(null);
-  const [newestPriceAsOf, setNewestPriceAsOf] = useState<string | null>(null);
+  const [regimeLoading, setRegimeLoading] = useState(false);
   const tabRef = useRef(tab);
   const displayRef = useRef(displayLimit);
+  const tabCacheRef = useRef<
+    Partial<Record<TabId, { rows: Snapshot[]; at: number; limit: number }>>
+  >({});
   tabRef.current = tab;
   displayRef.current = displayLimit;
 
-  const loadFiltered = async (kind: TabId, limit: number) => {
-    const m = await fetchJson<unknown>(
-      apiUrl(`/api/scanners/live?kind=${kind}&limit=${limit}`),
-      []
-    );
-    const list = Array.isArray(m) ? (m as Snapshot[]) : [];
-    setRows(list);
-    return list.length;
+  const TAB_CACHE_MS = 5 * 60 * 1000;
+
+  const loadFiltered = async (
+    kind: TabId,
+    limit: number,
+    opts?: { live?: boolean; force?: boolean }
+  ): Promise<Snapshot[]> => {
+    const live = opts?.live ?? false;
+    const qs = new URLSearchParams({
+      kind,
+      limit: String(limit),
+    });
+    if (live) {
+      qs.set("live_prices", "true");
+      if (opts?.force) qs.set("force_prices", "true");
+    }
+    const m = await fetchJson<unknown>(apiUrl(`/api/scanners/live?${qs}`), []);
+    let list = Array.isArray(m) ? (m as Snapshot[]) : [];
+    if (!live) list = mergeCachedPrices(list);
+    if (live && list.length) storePricesFromRows(list);
+    return list;
   };
 
+  const loadRegime = useCallback(async () => {
+    const r = await fetchJson<Record<string, unknown>>(apiUrl("/api/regime"), {});
+    setRegime(r);
+  }, []);
+
   const loadStatus = useCallback(async () => {
-    const [h, r, a, limits, meta] = await Promise.all([
+    const [h, a, limits, meta] = await Promise.all([
       fetchJson<Record<string, unknown> | null>(apiUrl("/health"), null),
-      fetchJson<Record<string, unknown>>(apiUrl("/api/regime"), {}),
       fetchJson<unknown[]>(apiUrl("/api/alerts?limit=10"), []),
-      fetchJson<{ scan_max_symbols?: number; scan_news_max_symbols?: number }>(
-        apiUrl("/api/scanners/limits"),
-        {}
-      ),
-      fetchJson<{ symbol_count?: number; scanned_at?: string | null; prices_updated_at?: string | null; newest_price_as_of?: string | null }>(
+      fetchJson<{
+        scan_max_symbols?: number;
+        scan_news_max_symbols?: number;
+        scan_min_daily_volume?: number;
+        scan_min_market_cap?: number;
+      }>(apiUrl("/api/scanners/limits"), {}),
+      fetchJson<{ symbol_count?: number; scanned_at?: string | null }>(
         apiUrl("/api/scanners/meta"),
         {}
       ),
     ]);
     setHealth(h);
-    setRegime(r);
     setAlerts(Array.isArray(a) ? (a as Array<Record<string, string>>) : []);
     if (limits.scan_max_symbols) setMaxScan(limits.scan_max_symbols);
     if (limits.scan_news_max_symbols) setNewsMax(limits.scan_news_max_symbols);
+    if (limits.scan_min_daily_volume) setMinVolume(limits.scan_min_daily_volume);
+    if (limits.scan_min_market_cap) setMinMarketCap(limits.scan_min_market_cap);
     const count = meta.symbol_count ?? 0;
     setLastScanCount(count);
     setScannedAt(meta.scanned_at ?? null);
-    setPricesUpdatedAt(meta.prices_updated_at ?? null);
-    setNewestPriceAsOf(meta.newest_price_as_of ?? null);
     if (!h) setError("Cannot reach the API. Start the backend on port 8000.");
     return { count, meta };
   }, []);
 
-  const applyTabView = async (kind: TabId, limit: number) => {
-    const n = await loadFiltered(kind, limit);
+  const applyTabView = async (
+    kind: TabId,
+    limit: number,
+    hasScan?: boolean,
+    opts?: { live?: boolean; force?: boolean }
+  ) => {
+    const live = opts?.live ?? false;
+    const cached = tabCacheRef.current[kind];
+    if (
+      !live &&
+      cached &&
+      cached.limit === limit &&
+      Date.now() - cached.at < TAB_CACHE_MS
+    ) {
+      setRows(mergeCachedPrices(cached.rows));
+      const scanned = hasScan ?? lastScanCount > 0;
+      if (cached.rows.length > 0) setError(null);
+      return cached.rows.length;
+    }
+
+    if (live) setLoadingPrices(true);
+    let list: Snapshot[] = [];
+    try {
+      list = await loadFiltered(kind, limit, opts);
+      setRows(list);
+      tabCacheRef.current[kind] = { rows: list, at: Date.now(), limit };
+    } finally {
+      if (live) setLoadingPrices(false);
+    }
+    const n = list.length;
+    const scanned = hasScan ?? lastScanCount > 0;
     if (n === 0) {
-      setError(
-        `No tickers in ${TABS.find((t) => t.id === kind)?.label ?? kind} — run a scan or try another tab.`
-      );
+      if (!scanned) {
+        setError("No scan yet — set symbol count and click Run scan.");
+      } else {
+        setError(
+          `No tickers in ${TABS.find((t) => t.id === kind)?.label ?? kind} for this tab — try Live Movers or run a new scan.`
+        );
+      }
     } else {
       setError(null);
     }
@@ -131,19 +188,22 @@ export function Dashboard() {
     if (!opts?.silent) setRefreshingPrices(true);
     if (!opts?.silent) setError(null);
     try {
-      await fetch(
-        apiUrl(`/api/scanners/refresh-prices?kind=${tabRef.current}&limit=${displayRef.current}`),
+      const res = await fetch(
+        apiUrl(
+          `/api/scanners/refresh-prices?kind=${tabRef.current}&limit=${displayRef.current}&force=true`
+        ),
         { method: "POST" }
       );
-      await applyTabView(tabRef.current, displayRef.current);
-      const meta = await fetchJson<{
-        scanned_at?: string | null;
-        prices_updated_at?: string | null;
-        newest_price_as_of?: string | null;
-      }>(apiUrl("/api/scanners/meta"), {});
-      setScannedAt(meta.scanned_at ?? null);
-      setPricesUpdatedAt(meta.prices_updated_at ?? null);
-      setNewestPriceAsOf(meta.newest_price_as_of ?? null);
+      if (!res.ok) throw new Error("refresh failed");
+      const list = (await res.json()) as Snapshot[];
+      storePricesFromRows(list);
+      setRows(list);
+      tabCacheRef.current[tabRef.current] = {
+        rows: list,
+        at: Date.now(),
+        limit: displayRef.current,
+      };
+      setPricesUpdatedAt(new Date().toISOString());
     } catch {
       if (!opts?.silent) setError("Price refresh failed.");
     } finally {
@@ -151,22 +211,17 @@ export function Dashboard() {
     }
   };
 
-  // Mount only — no auto-scan; refresh quotes if cache is stale
+  // Mount only — load API status; no scan, no price refresh until you click a button
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const { count, meta } = await loadStatus();
+      const { count } = await loadStatus();
       if (cancelled) return;
+      setRows([]);
       if (count > 0) {
-        await applyTabView(tabRef.current, displayRef.current);
-        const stale =
-          isPriceStale(meta.prices_updated_at) || isPriceStale(meta.newest_price_as_of);
-        if (stale && !cancelled) {
-          await refreshPrices({ silent: true });
-        }
+        setError("Cached scan available — click Run scan or switch tabs to load the list.");
       } else {
-        setRows([]);
         setError("No scan yet — set symbol count and click Run scan.");
       }
       setLoading(false);
@@ -175,17 +230,6 @@ export function Dashboard() {
       cancelled = true;
     };
   }, [loadStatus]);
-
-  // Keep prices current while dashboard is open (every 60s)
-  useEffect(() => {
-    if (lastScanCount === 0) return;
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible" && !scanning) {
-        refreshPrices({ silent: true });
-      }
-    }, 60_000);
-    return () => window.clearInterval(id);
-  }, [lastScanCount, scanning]);
 
   const handleTabChange = (id: TabId) => {
     setTab(id);
@@ -204,6 +248,8 @@ export function Dashboard() {
   const runScan = async () => {
     setScanning(true);
     setError(null);
+    tabCacheRef.current = {};
+    clearPriceCache();
     try {
       const res = await fetch(
         apiUrl(`/api/scanners/run?limit=${Math.min(scanLimit, maxScan)}`),
@@ -214,27 +260,32 @@ export function Dashboard() {
         setError(body.message || "Scan failed to start");
         return;
       }
-      const prev = lastScanCount;
+      const prevCount = lastScanCount;
+      const prevScannedAt = scannedAt;
       for (let i = 0; i < 120; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const meta = await fetchJson<{
           symbol_count?: number;
           scanned_at?: string | null;
-          prices_updated_at?: string | null;
-          newest_price_as_of?: string | null;
         }>(apiUrl("/api/scanners/meta"), {});
         const count = meta.symbol_count ?? 0;
-        if (count > 0 && count !== prev) {
+        const scanned = meta.scanned_at ?? null;
+        const finished =
+          scanned &&
+          (scanned !== prevScannedAt || (count > 0 && count !== prevCount));
+        if (finished) {
           setLastScanCount(count);
-          setScannedAt(meta.scanned_at ?? null);
-          setPricesUpdatedAt(meta.prices_updated_at ?? null);
-          setNewestPriceAsOf(meta.newest_price_as_of ?? null);
-          await applyTabView(tab, displayLimit);
-          setError(null);
+          setScannedAt(scanned);
+          const n = await applyTabView(tab, displayLimit, count > 0, { live: true });
+          if (n === 0 && count === 0) {
+            setError(
+              "Scan finished but no tickers passed filters (vol ≥ 100k, cap ≥ $50M when known). Try more symbols."
+            );
+          }
           return;
         }
       }
-      setError("Scan still running or timed out — try Refresh prices in a minute.");
+      setError("Scan still running or timed out — wait and click a tab to reload.");
     } catch {
       setError("Run scan failed — is the backend running?");
     } finally {
@@ -262,7 +313,16 @@ export function Dashboard() {
     }
   };
 
-  const busy = loading || scanning || refreshingPrices;
+  const loadRegimeClick = async () => {
+    setRegimeLoading(true);
+    try {
+      await loadRegime();
+    } finally {
+      setRegimeLoading(false);
+    }
+  };
+
+  const busy = loading || scanning || refreshingPrices || loadingPrices;
 
   return (
     <div>
@@ -281,34 +341,52 @@ export function Dashboard() {
         </pre>
       </section>
 
-      {regime && Array.isArray((regime as { items?: unknown[] }).items) && (
-        <section
+      <section style={{ marginBottom: "1rem" }}>
+        <button
+          type="button"
+          onClick={loadRegimeClick}
+          disabled={regimeLoading || busy}
           style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "0.75rem",
-            marginBottom: "1rem",
+            padding: "0.35rem 0.75rem",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--muted)",
+            cursor: "pointer",
+            fontSize: "0.85rem",
           }}
         >
-          {((regime as { items: Array<Record<string, unknown>> }).items || []).map((item) => (
-            <div
-              key={String(item.symbol)}
-              style={{
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: "0.5rem 0.75rem",
-                fontSize: "0.8rem",
-              }}
-            >
-              <strong>{String(item.symbol)}</strong>{" "}
-              {item.data_available
-                ? `${item.price} (${Number(item.change_pct).toFixed(1)}%)`
-                : "no data"}
-            </div>
-          ))}
-        </section>
-      )}
+          {regimeLoading ? "Loading regime quotes…" : "Load SPY/QQQ regime strip (optional)"}
+        </button>
+        {regime && Array.isArray((regime as { items?: unknown[] }).items) && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "0.75rem",
+              marginTop: "0.75rem",
+            }}
+          >
+            {((regime as { items: Array<Record<string, unknown>> }).items || []).map((item) => (
+              <div
+                key={String(item.symbol)}
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  padding: "0.5rem 0.75rem",
+                  fontSize: "0.8rem",
+                }}
+              >
+                <strong>{String(item.symbol)}</strong>{" "}
+                {item.data_available
+                  ? `${item.price} (${Number(item.change_pct).toFixed(1)}%)`
+                  : "no data"}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section
         style={{
@@ -361,8 +439,8 @@ export function Dashboard() {
           Last scan: {lastScanCount} symbols
           {scannedAt ? ` · scanned ${new Date(scannedAt).toLocaleString()}` : ""}
           {pricesUpdatedAt ? ` · prices ${new Date(pricesUpdatedAt).toLocaleTimeString()}` : ""}
-          {isPriceStale(pricesUpdatedAt) || isPriceStale(newestPriceAsOf) ? " · stale" : ""}
           {scanLimit > newsMax ? ` · news skipped above ${newsMax}` : ""}
+          {` · vol ≥ ${(minVolume / 1000).toFixed(0)}k · cap ≥ $${(minMarketCap / 1_000_000).toFixed(0)}M`}
         </span>
       </section>
 
@@ -385,6 +463,12 @@ export function Dashboard() {
           </button>
         ))}
       </nav>
+
+      {loadingPrices && (
+        <p style={{ color: "var(--muted)", marginBottom: "0.75rem", fontSize: "0.9rem" }}>
+          Fetching live prices from Alpaca…
+        </p>
+      )}
 
       {error && (
         <p style={{ color: "var(--warn)", marginBottom: "0.75rem", fontSize: "0.9rem" }}>
@@ -421,14 +505,14 @@ export function Dashboard() {
             cursor: "pointer",
           }}
         >
-          {refreshingPrices ? "Refreshing prices…" : "Refresh prices"}
+          {refreshingPrices ? "Updating prices…" : "Update prices now"}
         </button>
       </div>
 
       <MoversTable
         rows={rows}
-        onRefresh={runScan}
-        loading={busy}
+        onRunScan={runScan}
+        loading={scanning}
         scanLabel={scanning ? `Scanning ${scanLimit}…` : `Run scan (${scanLimit})`}
       />
 

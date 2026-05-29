@@ -136,24 +136,9 @@ async def fetch_quote(symbol: str) -> dict[str, Any] | None:
             price_as_of = datetime.fromtimestamp(ts, tz=timezone.utc)
         except (ValueError, OSError, TypeError):
             pass
-    session = ""
-    if price_as_of:
-        from zoneinfo import ZoneInfo
+    from app.collectors.session_util import current_session_label
 
-        ny = ZoneInfo("America/New_York")
-        local = price_as_of.astimezone(ny)
-        if local.weekday() >= 5:
-            session = "weekend"
-        else:
-            mins = local.hour * 60 + local.minute
-            if 240 <= mins < 570:
-                session = "premarket"
-            elif 570 <= mins < 960:
-                session = "regular"
-            elif 960 <= mins < 1200:
-                session = "afterhours"
-            else:
-                session = "overnight_closed"
+    session = current_session_label()
     return {
         "ticker": symbol.upper(),
         "price": current,
@@ -220,6 +205,14 @@ def enrich_from_candles(raw: dict[str, Any], bars: list[dict[str, Any]]) -> None
         raw["hod"] = max((b.get("high") or 0) for b in bars)
     if not raw.get("lod"):
         raw["lod"] = min((b.get("low") or 0) for b in bars if b.get("low"))
+
+
+async def fetch_company_profile(symbol: str) -> dict[str, Any]:
+    """Company profile (free tier) — market cap, float, sector."""
+    if not has_finnhub():
+        return {}
+    data = await _get("/stock/profile2", {"symbol": symbol.upper()})
+    return data if isinstance(data, dict) else {}
 
 
 async def fetch_metrics(symbol: str) -> dict[str, Any]:

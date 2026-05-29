@@ -25,6 +25,9 @@ async def _job(scan_type: str) -> None:
 
 def start_scheduler() -> None:
     settings = get_settings()
+    if not settings.scheduler_enabled:
+        logger.info("Scheduler disabled (set SCHEDULER_ENABLED=true to enable)")
+        return
     jobs = [
         ("premarket", settings.scan_premarket),
         ("open_confirm", settings.scan_open_confirm),

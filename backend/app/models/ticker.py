@@ -53,6 +53,14 @@ class TickerSnapshot(BaseModel):
     price_as_of: datetime | None = None
     price_source: str = ""
     session: str = ""
+    active_session: str = ""
+    price_session: str = ""
+    regular_close: float | None = None
+    afterhours_price: float | None = None
+    afterhours_percent_change: float | None = None
+    premarket_price: float | None = None
+    overnight_price: float | None = None
+    market_price: float | None = None
     catalysts: list[Catalyst] = Field(default_factory=list)
     analyst_targets: list[dict[str, Any]] = Field(default_factory=list)
     last_news_time: datetime | None = None
