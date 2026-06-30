@@ -20,10 +20,15 @@ DISPLAY_DEFAULT = 100
 
 def passes_scan_filters(snap: TickerSnapshot) -> bool:
     """Min daily share volume and market cap (from settings)."""
+    if not snap.data_available or float(snap.price or 0) <= 0:
+        return False
+
     settings = get_settings()
     vol_min = int(settings.scan_min_daily_volume or 0)
-    if vol_min > 0 and int(snap.volume or 0) < vol_min:
+    vol = int(snap.volume or 0)
+    if vol_min > 0 and vol > 0 and vol < vol_min:
         return False
+    # Volume 0 with a valid price usually means closed market / Finnhub-only quote — keep row.
 
     cap_min = float(settings.scan_min_market_cap or 0)
     if cap_min > 0:
@@ -117,7 +122,9 @@ async def _fetch_many(symbols: list[str], *, include_news: bool = True) -> list[
     async def one(sym: str) -> TickerSnapshot | None:
         async with sem:
             try:
-                return await build_snapshot(sym, include_news=include_news)
+                return await build_snapshot(
+                    sym, include_news=include_news, fetch_ah_trades=False
+                )
             except Exception:
                 return None
 
@@ -306,7 +313,9 @@ async def refresh_prices(
         raw = cached.get(sym)
         if raw is None:
             async with sem:
-                raw = await fetch_raw_market(snap.ticker, enrich_fundamentals=False)
+                raw = await fetch_raw_market(
+                    snap.ticker, enrich_fundamentals=False, fetch_ah_trades=True
+                )
             if raw and raw.get("price"):
                 cache_set(sym, raw)
         if not raw or not raw.get("price"):

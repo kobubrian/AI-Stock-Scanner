@@ -279,7 +279,7 @@ export function Dashboard() {
           const n = await applyTabView(tab, displayLimit, count > 0, { live: true });
           if (n === 0 && count === 0) {
             setError(
-              "Scan finished but no tickers passed filters (vol ≥ 100k, cap ≥ $50M when known). Try more symbols."
+              "Scan finished with 0 tickers. Confirm ALPACA_API_KEY and FINNHUB_API_KEY in .env, restart the backend, then scan again. Filters: vol ≥ 100k (when volume known), cap ≥ $50M (when cap known)."
             );
           }
           return;

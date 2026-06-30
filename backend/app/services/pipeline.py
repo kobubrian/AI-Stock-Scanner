@@ -27,8 +27,13 @@ def _session_fields(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def build_snapshot(symbol: str, *, include_news: bool = True) -> TickerSnapshot:
-    raw = await fetch_raw_market(symbol)
+async def build_snapshot(
+    symbol: str,
+    *,
+    include_news: bool = True,
+    fetch_ah_trades: bool = False,
+) -> TickerSnapshot:
+    raw = await fetch_raw_market(symbol, fetch_ah_trades=fetch_ah_trades)
     raw["price"] = float(raw.get("price") or 0)
 
     catalyst_dicts: list = []

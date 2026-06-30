@@ -115,14 +115,19 @@ async def _enrich_market_cap(raw: dict[str, Any], symbol: str) -> None:
                 raw["market_cap"] = _market_cap_dollars(mc)
 
 
-async def fetch_raw_market(symbol: str, *, enrich_fundamentals: bool = True) -> dict[str, Any]:
+async def fetch_raw_market(
+    symbol: str,
+    *,
+    enrich_fundamentals: bool = True,
+    fetch_ah_trades: bool = True,
+) -> dict[str, Any]:
     symbol = symbol.upper()
     raw: dict[str, Any] | None = None
 
     if has_alpaca():
         from app.collectors.session_prices import fetch_multi_session_market
 
-        raw = await fetch_multi_session_market(symbol)
+        raw = await fetch_multi_session_market(symbol, fetch_ah_trades=fetch_ah_trades)
 
     if (not raw or not raw.get("price")) and has_finnhub():
         raw = await finnhub.fetch_quote(symbol)
@@ -140,6 +145,22 @@ async def fetch_raw_market(symbol: str, *, enrich_fundamentals: bool = True) -> 
 
     raw["ticker"] = symbol
     raw["data_available"] = bool(raw.get("price"))
+
+    if (
+        raw.get("price")
+        and int(raw.get("volume") or 0) <= 0
+        and has_alpaca()
+        and raw.get("source") != "alpaca"
+    ):
+        snap = await alpaca.fetch_snapshot_data(symbol, feed="iex")
+        if snap:
+            built = alpaca.build_snapshot_from_data(symbol, snap)
+            vol = int(built.get("volume") or 0)
+            if vol > 0:
+                raw["volume"] = vol
+                raw["vwap"] = raw.get("vwap") or built.get("vwap")
+                raw["hod"] = raw.get("hod") or built.get("hod")
+                raw["lod"] = raw.get("lod") or built.get("lod")
 
     # Alpaca snapshot already has session VWAP, volume, HOD/LOD — skip Finnhub
     # candles/metrics here to avoid blowing the free-tier rate limit (403/429).

@@ -160,7 +160,9 @@ def _display_session(active: str) -> str:
     return active
 
 
-async def fetch_multi_session_market(symbol: str) -> dict[str, Any]:
+async def fetch_multi_session_market(
+    symbol: str, *, fetch_ah_trades: bool = True
+) -> dict[str, Any]:
     """Primary price for current session + per-session quotes for extended display."""
     symbol = symbol.upper()
     active = current_session_label()
@@ -179,13 +181,19 @@ async def fetch_multi_session_market(symbol: str) -> dict[str, Any]:
             built = alpaca.build_snapshot_from_data(symbol, sip_data)
             prev_close = float(built.get("previous_close") or 0)
             volume = int(built.get("volume") or 0)
+            if volume <= 0:
+                prev_bar = sip_data.get("prevDailyBar") or {}
+                volume = int(prev_bar.get("v") or 0)
             vwap = built.get("vwap")
             bid, ask = built.get("bid"), built.get("ask")
             spread = built.get("spread_percent")
             hod, lod = built.get("hod"), built.get("lod")
             session_quotes.update(_classify_sip_snapshot(sip_data, prev_close))
 
-        ah = await alpaca.fetch_afterhours_from_trades(symbol)
+        if fetch_ah_trades:
+            ah = await alpaca.fetch_afterhours_from_trades(symbol)
+        else:
+            ah = None
         if ah and ah.get("price"):
             base = prev_close or float(
                 (session_quotes.get("regular") or {}).get("price") or 0

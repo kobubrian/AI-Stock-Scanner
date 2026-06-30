@@ -156,6 +156,8 @@ def _build_snapshot_dict(symbol: str, data: dict[str, Any]) -> dict[str, Any]:
 
     prev_close = float(prev.get("c") or 0)
     volume = int(daily.get("v") or 0)
+    if not volume:
+        volume = int(prev.get("v") or 0)
     if not volume and minute.get("v"):
         volume = int(minute.get("v") or 0)
 
